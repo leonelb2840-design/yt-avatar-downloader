@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YouTube Avatar Downloader</title>
+  <title>YouTube Avatar Downloader v2</title>
   <style>
     :root {
       --bg-color: #0f0f0f;
@@ -109,10 +109,15 @@
       text-align: center;
       min-height: 20px;
       color: #ffb700;
+      word-break: break-word;
     }
 
     .error {
       color: #ff4d4d;
+    }
+
+    .success {
+      color: #2ec4b6;
     }
 
     .preview-container {
@@ -139,7 +144,7 @@
   <h1>Descargar Foto de Canal YT</h1>
 
   <div class="form-group">
-    <label for="yt-url">Enlace del Canal de YouTube:</label>
+    <label for="yt-url">Enlace del Canal o Foto de YouTube:</label>
     <input type="text" id="yt-url" placeholder="https://www.youtube.com/@nombre_canal">
   </div>
 
@@ -176,6 +181,83 @@
 
 <script>
   let avatarOriginalUrl = '';
+  let activeBlobObjectUrl = null;
+
+  // Lista de servidores proxy de respaldo
+  const PROXIES = [
+    {
+      name: 'CorsProxy',
+      getHtml: async (url) => {
+        const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.text();
+      },
+      getBlob: async (url) => {
+        const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.blob();
+      }
+    },
+    {
+      name: 'AllOrigins',
+      getHtml: async (url) => {
+        const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        return json.contents;
+      },
+      getBlob: async (url) => {
+        const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.blob();
+      }
+    },
+    {
+      name: 'CodeTabs',
+      getHtml: async (url) => {
+        const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.text();
+      },
+      getBlob: async (url) => {
+        const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.blob();
+      }
+    }
+  ];
+
+  async function fetchHTMLWithFallback(targetUrl, statusElem) {
+    let lastErr = null;
+
+    for (const proxy of PROXIES) {
+      try {
+        statusElem.textContent = `Conectando mediante servidor (${proxy.name})...`;
+        const html = await proxy.getHtml(targetUrl);
+        if (html && html.length > 200) {
+          return html;
+        }
+      } catch (err) {
+        console.warn(`Proxy ${proxy.name} falló:`, err);
+        lastErr = err;
+      }
+    }
+    throw new Error('No se pudo conectar a YouTube a través de ningún servidor. Revisa tu conexión a internet.');
+  }
+
+  async function fetchBlobWithFallback(imgUrl, statusElem) {
+    for (const proxy of PROXIES) {
+      try {
+        const blob = await proxy.getBlob(imgUrl);
+        if (blob && blob.size > 0) {
+          return blob;
+        }
+      } catch (err) {
+        console.warn(`Error al descargar blob con ${proxy.name}:`, err);
+      }
+    }
+    throw new Error('No se pudo descargar los bytes de la imagen.');
+  }
 
   async function buscarImagen() {
     const urlInput = document.getElementById('yt-url').value.trim();
@@ -189,69 +271,70 @@
       return;
     }
 
-    status.textContent = 'Obteniendo datos del canal...';
+    status.textContent = 'Iniciando búsqueda...';
     status.className = 'status';
     btnFetch.disabled = true;
     controls.style.display = 'none';
 
     try {
-      // Proxy CORS para extraer la etiqueta og:image del canal
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(urlInput)}`;
-      const response = await fetch(proxyUrl);
-      
-      if (!response.ok) throw new Error('No se pudo conectar.');
-      
-      const data = await response.json();
-      const htmlText = data.contents;
+      let directImgUrl = '';
 
-      // Buscar meta etiqueta og:image
-      const ogImageMatch = htmlText.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) ||
-                           htmlText.match(/<meta\s+content="([^"]+)"\s+property="og:image"/i);
+      // Si el usuario pega directamente la URL de la imagen de Google/YouTube
+      if (urlInput.includes('ggpht.com') || urlInput.includes('googleusercontent.com')) {
+        directImgUrl = urlInput;
+      } else {
+        const htmlText = await fetchHTMLWithFallback(urlInput, status);
 
-      if (!ogImageMatch || !ogImageMatch[1]) {
-        throw new Error('No se encontró la foto de perfil del canal.');
+        // Extraer meta etiqueta og:image
+        const ogMatch = htmlText.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) ||
+                        htmlText.match(/<meta\s+content="([^"]+)"\s+property="og:image"/i);
+
+        if (!ogMatch || !ogMatch[1]) {
+          throw new Error('No se encontró la foto de perfil en el enlace ingresado.');
+        }
+
+        directImgUrl = ogMatch[1];
       }
 
-      let imgUrl = ogImageMatch[1];
-
-      // Forzar máxima resolución original reescribiendo la escala de Google (=s2048)
-      if (imgUrl.includes('=s')) {
-        imgUrl = imgUrl.replace(/=s\d+[^"]*/, '=s2048-c-k-c0x00ffffff-no-rj');
+      // Reemplazar parámetro de tamaño para pedir resolución máxima (2048px)
+      if (directImgUrl.includes('=s')) {
+        directImgUrl = directImgUrl.replace(/=s\d+[^"]*/, '=s2048-c-k-c0x00ffffff-no-rj');
       }
 
-      avatarOriginalUrl = imgUrl;
+      avatarOriginalUrl = directImgUrl;
 
-      // Mostrar vista previa usando proxy de imagen directa
+      status.textContent = 'Descargando vista previa...';
+      const imgBlob = await fetchBlobWithFallback(avatarOriginalUrl, status);
+      
+      if (activeBlobObjectUrl) {
+        URL.revokeObjectURL(activeBlobObjectUrl);
+      }
+      activeBlobObjectUrl = URL.createObjectURL(imgBlob);
+
       const imgPreview = document.getElementById('img-preview');
-      imgPreview.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(avatarOriginalUrl)}`;
+      imgPreview.src = activeBlobObjectUrl;
 
-      imgPreview.onload = () => {
-        status.textContent = '¡Imagen cargada con éxito!';
-        controls.style.display = 'block';
-        btnFetch.disabled = false;
-      };
-
-      imgPreview.onerror = () => {
-        throw new Error('Error al cargar la vista previa.');
-      };
+      status.textContent = '¡Imagen cargada correctamente!';
+      status.className = 'status success';
+      controls.style.display = 'block';
 
     } catch (err) {
-      status.textContent = err.message || 'Ocurrió un error al procesar el canal.';
+      status.textContent = err.message || 'Ocurrió un error inesperado.';
       status.className = 'status error';
+    } finally {
       btnFetch.disabled = false;
     }
   }
 
   function descargarImagen() {
-    if (!avatarOriginalUrl) return;
+    if (!activeBlobObjectUrl) return;
 
     const width = parseInt(document.getElementById('img-width').value) || 512;
     const height = parseInt(document.getElementById('img-height').value) || 512;
     const format = document.getElementById('img-format').value;
 
     const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(avatarOriginalUrl)}`;
+    img.src = activeBlobObjectUrl;
 
     img.onload = () => {
       const canvas = document.createElement('canvas');
@@ -260,21 +343,18 @@
 
       const ctx = canvas.getContext('2d');
 
-      // Si se exporta a JPG, dibujar fondo blanco por defecto
       if (format === 'jpeg') {
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
       }
 
-      // Dibujar y redimensionar la imagen en el Canvas
       ctx.drawImage(img, 0, 0, width, height);
 
       const mimeType = `image/${format}`;
       const dataUrl = canvas.toDataURL(mimeType, 0.95);
 
-      // Trigger de descarga
       const link = document.createElement('a');
-      link.download = `youtube_avatar_${width}x${height}.${format === 'jpeg' ? 'jpg' : format}`;
+      link.download = `yt_avatar_${width}x${height}.${format === 'jpeg' ? 'jpg' : format}`;
       link.href = dataUrl;
       document.body.appendChild(link);
       link.click();
