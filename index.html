@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YouTube Avatar Downloader v2</title>
+  <title>YouTube Avatar Downloader v3</title>
   <style>
     :root {
       --bg-color: #0f0f0f;
@@ -144,8 +144,8 @@
   <h1>Descargar Foto de Canal YT</h1>
 
   <div class="form-group">
-    <label for="yt-url">Enlace del Canal o Foto de YouTube:</label>
-    <input type="text" id="yt-url" placeholder="https://www.youtube.com/@nombre_canal">
+    <label for="yt-url">Enlace del Canal de YouTube o Handle (@canal):</label>
+    <input type="text" id="yt-url" placeholder="https://www.youtube.com/@nombre_canal o @nombre_canal">
   </div>
 
   <button id="btn-fetch" onclick="buscarImagen()">Buscar Foto</button>
@@ -180,161 +180,174 @@
 </div>
 
 <script>
-  let avatarOriginalUrl = '';
-  let activeBlobObjectUrl = null;
+  let avatarLoadedUrl = '';
 
-  // Lista de servidores proxy de respaldo
-  const PROXIES = [
+  // Lista de APIs públicas con CORS habilitado
+  const API_ENDPOINTS = [
     {
-      name: 'CorsProxy',
-      getHtml: async (url) => {
-        const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
+      name: 'Invidious (Node 1)',
+      fetchAvatar: async (id) => {
+        const res = await fetch(`https://inv.tux.pizza/api/v1/channels/${id}`);
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.text();
-      },
-      getBlob: async (url) => {
-        const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.blob();
+        const data = await res.json();
+        if (data.authorThumbnails && data.authorThumbnails.length > 0) {
+          return data.authorThumbnails[data.authorThumbnails.length - 1].url;
+        }
+        throw new Error('Sin imagen en este nodo.');
       }
     },
     {
-      name: 'AllOrigins',
-      getHtml: async (url) => {
-        const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
+      name: 'Invidious (Node 2)',
+      fetchAvatar: async (id) => {
+        const res = await fetch(`https://invidious.nerdvpn.de/api/v1/channels/${id}`);
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        const json = await res.json();
-        return json.contents;
-      },
-      getBlob: async (url) => {
-        const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.blob();
+        const data = await res.json();
+        if (data.authorThumbnails && data.authorThumbnails.length > 0) {
+          return data.authorThumbnails[data.authorThumbnails.length - 1].url;
+        }
+        throw new Error('Sin imagen en este nodo.');
       }
     },
     {
-      name: 'CodeTabs',
-      getHtml: async (url) => {
-        const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`);
+      name: 'Piped API',
+      fetchAvatar: async (id) => {
+        const res = await fetch(`https://pipedapi.kavin.rocks/channel/${id}`);
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.text();
-      },
-      getBlob: async (url) => {
-        const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.blob();
+        const data = await res.json();
+        if (data.avatarUrl) return data.avatarUrl;
+        throw new Error('Sin avatar en Piped.');
       }
     }
   ];
 
-  async function fetchHTMLWithFallback(targetUrl, statusElem) {
-    let lastErr = null;
+  function extraerIdentificador(input) {
+    input = input.trim();
 
-    for (const proxy of PROXIES) {
-      try {
-        statusElem.textContent = `Conectando mediante servidor (${proxy.name})...`;
-        const html = await proxy.getHtml(targetUrl);
-        if (html && html.length > 200) {
-          return html;
-        }
-      } catch (err) {
-        console.warn(`Proxy ${proxy.name} falló:`, err);
-        lastErr = err;
-      }
+    // Si pegan directamente una URL de imagen de Google/YouTube
+    if (input.includes('ggpht.com') || input.includes('googleusercontent.com')) {
+      return { type: 'image_url', value: input };
     }
-    throw new Error('No se pudo conectar a YouTube a través de ningún servidor. Revisa tu conexión a internet.');
+
+    // Extraer @handle
+    const handleMatch = input.match(/(?:youtube\.com\/)?(@[\w.-]+)/i);
+    if (handleMatch) return { type: 'api_id', value: handleMatch[1] };
+
+    // Extraer Channel ID (UC...)
+    const channelMatch = input.match(/youtube\.com\/channel\/(UC[\w-]+)/i);
+    if (channelMatch) return { type: 'api_id', value: channelMatch[1] };
+
+    // Extraer nombre de canal personalizado
+    const customMatch = input.match(/youtube\.com\/c\/([\w.-]+)/i) || input.match(/youtube\.com\/user\/([\w.-]+)/i);
+    if (customMatch) return { type: 'api_id', value: customMatch[1] };
+
+    // Si el texto no es una URL completa, asumirlo como ID o Handle
+    if (!input.includes('http')) {
+      return { type: 'api_id', value: input.startsWith('@') ? input : '@' + input };
+    }
+
+    return { type: 'unknown', value: input };
   }
 
-  async function fetchBlobWithFallback(imgUrl, statusElem) {
-    for (const proxy of PROXIES) {
-      try {
-        const blob = await proxy.getBlob(imgUrl);
-        if (blob && blob.size > 0) {
-          return blob;
-        }
-      } catch (err) {
-        console.warn(`Error al descargar blob con ${proxy.name}:`, err);
-      }
+  function optimizarResolucion(url) {
+    // Si la URL es relativa de Invidious, convertir a absoluta
+    if (url.startsWith('//')) url = 'https:' + url;
+    
+    // Reemplazar parámetro de calidad por 2048px (Máxima resolución original)
+    if (url.includes('=s')) {
+      return url.replace(/=s\d+[^"]*/, '=s2048-c-k-c0x00ffffff-no-rj');
     }
-    throw new Error('No se pudo descargar los bytes de la imagen.');
+    return url;
   }
 
   async function buscarImagen() {
-    const urlInput = document.getElementById('yt-url').value.trim();
+    const rawInput = document.getElementById('yt-url').value;
     const status = document.getElementById('status');
     const controls = document.getElementById('controls');
     const btnFetch = document.getElementById('btn-fetch');
 
-    if (!urlInput) {
-      status.textContent = 'Por favor ingresa una URL válida.';
+    if (!rawInput.trim()) {
+      status.textContent = 'Ingresa un enlace o handle del canal.';
       status.className = 'status error';
       return;
     }
 
-    status.textContent = 'Iniciando búsqueda...';
+    status.textContent = 'Procesando...';
     status.className = 'status';
     btnFetch.disabled = true;
     controls.style.display = 'none';
 
+    const parsed = extraerIdentificador(rawInput);
+
     try {
-      let directImgUrl = '';
+      let finalImgUrl = '';
 
-      // Si el usuario pega directamente la URL de la imagen de Google/YouTube
-      if (urlInput.includes('ggpht.com') || urlInput.includes('googleusercontent.com')) {
-        directImgUrl = urlInput;
-      } else {
-        const htmlText = await fetchHTMLWithFallback(urlInput, status);
+      if (parsed.type === 'image_url') {
+        finalImgUrl = parsed.value;
+      } else if (parsed.type === 'api_id') {
+        let obtenido = false;
 
-        // Extraer meta etiqueta og:image
-        const ogMatch = htmlText.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) ||
-                        htmlText.match(/<meta\s+content="([^"]+)"\s+property="og:image"/i);
-
-        if (!ogMatch || !ogMatch[1]) {
-          throw new Error('No se encontró la foto de perfil en el enlace ingresado.');
+        for (const api of API_ENDPOINTS) {
+          try {
+            status.textContent = `Consultando canal (${api.name})...`;
+            const rawUrl = await api.fetchAvatar(parsed.value);
+            if (rawUrl) {
+              finalImgUrl = rawUrl;
+              obtenido = true;
+              break;
+            }
+          } catch (e) {
+            console.warn(`Falló la consulta en ${api.name}`, e);
+          }
         }
 
-        directImgUrl = ogMatch[1];
+        if (!obtenido) {
+          throw new Error('No se pudo encontrar el avatar. Verifica que el nombre o enlace del canal sea correcto.');
+        }
+      } else {
+        throw new Error('Formato de URL no reconocido. Intenta usando el handle directamente, por ejemplo: @NombreDeCanal');
       }
 
-      // Reemplazar parámetro de tamaño para pedir resolución máxima (2048px)
-      if (directImgUrl.includes('=s')) {
-        directImgUrl = directImgUrl.replace(/=s\d+[^"]*/, '=s2048-c-k-c0x00ffffff-no-rj');
-      }
+      avatarLoadedUrl = optimizarResolucion(finalImgUrl);
 
-      avatarOriginalUrl = directImgUrl;
-
-      status.textContent = 'Descargando vista previa...';
-      const imgBlob = await fetchBlobWithFallback(avatarOriginalUrl, status);
-      
-      if (activeBlobObjectUrl) {
-        URL.revokeObjectURL(activeBlobObjectUrl);
-      }
-      activeBlobObjectUrl = URL.createObjectURL(imgBlob);
-
+      // Cargar en la vista previa
       const imgPreview = document.getElementById('img-preview');
-      imgPreview.src = activeBlobObjectUrl;
+      imgPreview.crossOrigin = "anonymous";
+      imgPreview.src = avatarLoadedUrl;
 
-      status.textContent = '¡Imagen cargada correctamente!';
-      status.className = 'status success';
-      controls.style.display = 'block';
+      imgPreview.onload = () => {
+        status.textContent = '¡Imagen obtenida exitosamente!';
+        status.className = 'status success';
+        controls.style.display = 'block';
+        btnFetch.disabled = false;
+      };
+
+      imgPreview.onerror = () => {
+        // En caso de que falle por política de origen de la imagen, usar fallback directo
+        imgPreview.removeAttribute('crossOrigin');
+        imgPreview.src = avatarLoadedUrl;
+        status.textContent = '¡Imagen obtenida!';
+        status.className = 'status success';
+        controls.style.display = 'block';
+        btnFetch.disabled = false;
+      };
 
     } catch (err) {
-      status.textContent = err.message || 'Ocurrió un error inesperado.';
+      status.textContent = err.message || 'Error al obtener la imagen.';
       status.className = 'status error';
-    } finally {
       btnFetch.disabled = false;
     }
   }
 
   function descargarImagen() {
-    if (!activeBlobObjectUrl) return;
+    if (!avatarLoadedUrl) return;
 
     const width = parseInt(document.getElementById('img-width').value) || 512;
     const height = parseInt(document.getElementById('img-height').value) || 512;
     const format = document.getElementById('img-format').value;
 
     const img = new Image();
-    img.src = activeBlobObjectUrl;
+    img.crossOrigin = "anonymous";
+    img.src = avatarLoadedUrl;
 
     img.onload = () => {
       const canvas = document.createElement('canvas');
@@ -343,6 +356,7 @@
 
       const ctx = canvas.getContext('2d');
 
+      // Si es JPG, añadir fondo blanco para evitar transparencias negras
       if (format === 'jpeg') {
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
@@ -354,11 +368,15 @@
       const dataUrl = canvas.toDataURL(mimeType, 0.95);
 
       const link = document.createElement('a');
-      link.download = `yt_avatar_${width}x${height}.${format === 'jpeg' ? 'jpg' : format}`;
+      link.download = `youtube_avatar_${width}x${height}.${format === 'jpeg' ? 'jpg' : format}`;
       link.href = dataUrl;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+    };
+
+    img.onerror = () => {
+      alert('Hubo un problema al procesar la imagen para su redimensionamiento.');
     };
   }
 </script>
