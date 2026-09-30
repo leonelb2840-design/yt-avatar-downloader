@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Avatar Downloader</title>
+  <style>
+    :root {
+      --bg-color: #0f0f0f;
+      --card-bg: #1f1f1f;
+      --accent-color: #ff0000;
+      --text-color: #ffffff;
+      --subtext-color: #aaaaaa;
+      --border-color: #333333;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', Roboto, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 28px;
+      max-width: 480px;
+      width: 100%;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 20px;
+      text-align: center;
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--subtext-color);
+      margin-bottom: 6px;
+    }
+
+    input[type="text"], 
+    input[type="number"], 
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      background-color: #121212;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-color);
+      font-size: 0.95rem;
+      outline: none;
+    }
+
+    input:focus, select:focus {
+      border-color: var(--accent-color);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    button {
+      width: 100%;
+      padding: 12px;
+      background-color: var(--accent-color);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-weight: bold;
+      cursor: pointer;
+      font-size: 1rem;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background-color: #cc0000;
+    }
+
+    button:disabled {
+      background-color: #555555;
+      cursor: not-allowed;
+    }
+
+    .status {
+      font-size: 0.85rem;
+      margin-top: 12px;
+      text-align: center;
+      min-height: 20px;
+      color: #ffb700;
+    }
+
+    .error {
+      color: #ff4d4d;
+    }
+
+    .preview-container {
+      margin-top: 20px;
+      text-align: center;
+      display: none;
+      border-top: 1px solid var(--border-color);
+      padding-top: 20px;
+    }
+
+    .preview-img {
+      max-width: 180px;
+      max-height: 180px;
+      border-radius: 50%;
+      border: 2px solid var(--border-color);
+      margin-bottom: 16px;
+      object-fit: cover;
+    }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Descargar Foto de Canal YT</h1>
+
+  <div class="form-group">
+    <label for="yt-url">Enlace del Canal de YouTube:</label>
+    <input type="text" id="yt-url" placeholder="https://www.youtube.com/@nombre_canal">
+  </div>
+
+  <button id="btn-fetch" onclick="buscarImagen()">Buscar Foto</button>
+
+  <div id="status" class="status"></div>
+
+  <div id="controls" class="preview-container">
+    <img id="img-preview" class="preview-img" alt="Vista previa">
+
+    <div class="grid-2 form-group">
+      <div>
+        <label for="img-width">Ancho (px):</label>
+        <input type="number" id="img-width" value="512" min="16" max="4096">
+      </div>
+      <div>
+        <label for="img-height">Alto (px):</label>
+        <input type="number" id="img-height" value="512" min="16" max="4096">
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label for="img-format">Formato de Descarga:</label>
+      <select id="img-format">
+        <option value="png">PNG (Transparencia)</option>
+        <option value="jpeg">JPG / JPEG</option>
+        <option value="webp">WebP (Optimizado)</option>
+      </select>
+    </div>
+
+    <button onclick="descargarImagen()">Descargar Imagen</button>
+  </div>
+</div>
+
+<script>
+  let avatarOriginalUrl = '';
+
+  async function buscarImagen() {
+    const urlInput = document.getElementById('yt-url').value.trim();
+    const status = document.getElementById('status');
+    const controls = document.getElementById('controls');
+    const btnFetch = document.getElementById('btn-fetch');
+
+    if (!urlInput) {
+      status.textContent = 'Por favor ingresa una URL válida.';
+      status.className = 'status error';
+      return;
+    }
+
+    status.textContent = 'Obteniendo datos del canal...';
+    status.className = 'status';
+    btnFetch.disabled = true;
+    controls.style.display = 'none';
+
+    try {
+      // Proxy CORS para extraer la etiqueta og:image del canal
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(urlInput)}`;
+      const response = await fetch(proxyUrl);
+      
+      if (!response.ok) throw new Error('No se pudo conectar.');
+      
+      const data = await response.json();
+      const htmlText = data.contents;
+
+      // Buscar meta etiqueta og:image
+      const ogImageMatch = htmlText.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) ||
+                           htmlText.match(/<meta\s+content="([^"]+)"\s+property="og:image"/i);
+
+      if (!ogImageMatch || !ogImageMatch[1]) {
+        throw new Error('No se encontró la foto de perfil del canal.');
+      }
+
+      let imgUrl = ogImageMatch[1];
+
+      // Forzar máxima resolución original reescribiendo la escala de Google (=s2048)
+      if (imgUrl.includes('=s')) {
+        imgUrl = imgUrl.replace(/=s\d+[^"]*/, '=s2048-c-k-c0x00ffffff-no-rj');
+      }
+
+      avatarOriginalUrl = imgUrl;
+
+      // Mostrar vista previa usando proxy de imagen directa
+      const imgPreview = document.getElementById('img-preview');
+      imgPreview.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(avatarOriginalUrl)}`;
+
+      imgPreview.onload = () => {
+        status.textContent = '¡Imagen cargada con éxito!';
+        controls.style.display = 'block';
+        btnFetch.disabled = false;
+      };
+
+      imgPreview.onerror = () => {
+        throw new Error('Error al cargar la vista previa.');
+      };
+
+    } catch (err) {
+      status.textContent = err.message || 'Ocurrió un error al procesar el canal.';
+      status.className = 'status error';
+      btnFetch.disabled = false;
+    }
+  }
+
+  function descargarImagen() {
+    if (!avatarOriginalUrl) return;
+
+    const width = parseInt(document.getElementById('img-width').value) || 512;
+    const height = parseInt(document.getElementById('img-height').value) || 512;
+    const format = document.getElementById('img-format').value;
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(avatarOriginalUrl)}`;
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+
+      const ctx = canvas.getContext('2d');
+
+      // Si se exporta a JPG, dibujar fondo blanco por defecto
+      if (format === 'jpeg') {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      // Dibujar y redimensionar la imagen en el Canvas
+      ctx.drawImage(img, 0, 0, width, height);
+
+      const mimeType = `image/${format}`;
+      const dataUrl = canvas.toDataURL(mimeType, 0.95);
+
+      // Trigger de descarga
+      const link = document.createElement('a');
+      link.download = `youtube_avatar_${width}x${height}.${format === 'jpeg' ? 'jpg' : format}`;
+      link.href = dataUrl;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+  }
+</script>
+
+</body>
+</html>
